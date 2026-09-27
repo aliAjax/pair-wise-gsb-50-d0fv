@@ -1,5 +1,6 @@
 """领域基础类型与输入校验。"""
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List
 
 
@@ -95,3 +96,13 @@ def text_list(data: Dict[str, Any], key: str, minimum: int = 0) -> List[str]:
     if len(value) < minimum:
         raise ValidationError("%s至少需要%s项" % (key, minimum))
     return [item.strip() for item in value]
+
+
+def iso_date(data: Dict[str, Any], key: str) -> str:
+    """严格解析YYYY-MM-DD日期，返回归一化文本。"""
+    value = text(data, key)
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValidationError("%s必须是YYYY-MM-DD日期" % key) from exc
+    return parsed.isoformat()

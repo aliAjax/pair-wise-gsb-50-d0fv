@@ -1,12 +1,13 @@
 """税务稽查案件与复议流程领域规则与状态转换。"""
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
-from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, number, text, text_list
+from .delivery import DeliveryRules
+from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, iso_date, number, text, text_list
 
 
 INITIAL_STATE = "opened"
 CREATE_ROLES = {'inspector'}
-ACTION_ROLES = {'investigate': {'inspector'}, 'propose': {'inspector'}, 'review': {'reviewer'}, 'appeal': {'taxpayer_rep'}, 'close': {'reviewer'}}
+ACTION_ROLES = {'investigate': {'inspector'}, 'propose': {'inspector'}, 'review': {'reviewer'}, 'appeal': {'taxpayer_rep'}, 'close': {'reviewer'}, 'deliver': {'inspector', 'reviewer'}}
 TRANSITIONS = {'investigate': {'opened': 'investigating'}, 'propose': {'investigating': 'proposed'}, 'review': {'proposed': 'reviewed'}, 'appeal': {'reviewed': 'appealed'}, 'close': {'reviewed': 'closed', 'appealed': 'closed'}}
 
 
@@ -60,7 +61,7 @@ class DomainRules:
             raise Conflict("当前状态不允许执行%s" % action)
         return allowed
 
-    def apply_action(self, record: Dict[str, Any], action: str, data: Dict[str, Any]) -> Tuple[str, Dict[str, Any], str]:
+    def apply_action(self, record: Dict[str, Any], action: str, data: Dict[str, Any], delivery_view: Optional[Dict[str, Any]] = None) -> Tuple[str, Dict[str, Any], str]:
         new_state = self.require_transition(record, action)
         data = dict(data or {})
         p = dict(record["payload"])
@@ -83,14 +84,22 @@ class DomainRules:
                 changes["total_due"] = round(float(p["total_due"]) * float(data.get("reduction_pct", 0.5)), 2)
             summary = "复核完成"
         elif action == "appeal":
-            appeal_day = integer(data, "appeal_day", 0)
-            if appeal_day > int(p["appeal_deadline_day"]):
-                raise ValidationError("复议申请超过期限")
+            effective_day = (delivery_view or {}).get("effective_day") or ""
+            if not effective_day:
+                raise ValidationError("稽查决定尚未有效送达，复议期限从送达生效日起算")
+            appeal_day = iso_date(data, "appeal_day")
+            DeliveryRules().appeal_check(effective_day, appeal_day, int(p["appeal_deadline_day"]))
             changes["appeal_day"] = appeal_day
+            changes["appeal_effective_day"] = effective_day
             changes["appeal_reason"] = text(data, "appeal_reason")
             summary = "复议申请已受理"
         elif action == "close":
+            blockers = (delivery_view or {}).get("can_close") is False
+            if blockers:
+                raise ValidationError((delivery_view.get("todos") or ["送达生效前不能结案"])[-1])
             changes["final_decision"] = text(data, "final_decision")
+            if delivery_view and delivery_view.get("effective_day"):
+                changes["delivery_effective_day"] = delivery_view["effective_day"]
             summary = "案件已结案"
         p.update(changes)
         return new_state, p, summary or ("已执行%s" % action)

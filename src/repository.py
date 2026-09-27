@@ -47,8 +47,26 @@ class Repository:
                     details TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS deliveries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    record_id INTEGER NOT NULL REFERENCES records(id) ON DELETE CASCADE,
+                    document TEXT NOT NULL,
+                    method TEXT NOT NULL,
+                    voucher_day TEXT NOT NULL DEFAULT '',
+                    voucher_label TEXT NOT NULL DEFAULT '',
+                    notice_day TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    corrects_id INTEGER REFERENCES deliveries(id),
+                    correction_reason TEXT NOT NULL DEFAULT '',
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_records_state ON records(state);
                 CREATE INDEX IF NOT EXISTS idx_audit_record ON audit_events(record_id, id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_deliveries_active
+                    ON deliveries(record_id, document) WHERE status = 'active';
+                CREATE INDEX IF NOT EXISTS idx_deliveries_record ON deliveries(record_id, id);
                 """
             )
 
@@ -136,6 +154,91 @@ class Repository:
             item["details"] = json.loads(item["details"])
             result.append(item)
         return result
+
+    def list_deliveries(self, record_id: int) -> List[Dict[str, Any]]:
+        self.get(record_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM deliveries WHERE record_id=? ORDER BY id",
+                (record_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def register_delivery(
+        self,
+        record_id: int,
+        entry: Dict[str, Any],
+        actor_id: str,
+        audit_details: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """登记一条送达；补正时旧有效送达保留并置为superseded，全过程与审计在同一事务。"""
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            record = connection.execute("SELECT id, version FROM records WHERE id=?", (record_id,)).fetchone()
+            if record is None:
+                connection.rollback()
+                raise NotFound("记录不存在")
+            active = connection.execute(
+                "SELECT * FROM deliveries WHERE record_id=? AND document=? AND status='active'",
+                (record_id, entry["document"]),
+            ).fetchone()
+            corrects_id = entry.get("corrects_id")
+            if active is not None:
+                if corrects_id is None or int(corrects_id) != int(active["id"]):
+                    connection.rollback()
+                    raise Conflict("补正送达必须指向该文书当前有效的送达记录")
+                connection.execute(
+                    "UPDATE deliveries SET status='superseded' WHERE id=? AND status='active'",
+                    (corrects_id,),
+                )
+            elif corrects_id is not None:
+                target = connection.execute(
+                    "SELECT id FROM deliveries WHERE id=? AND record_id=?",
+                    (corrects_id, record_id),
+                ).fetchone()
+                if target is None:
+                    connection.rollback()
+                    raise NotFound("被补正的送达记录不存在")
+                connection.rollback()
+                raise Conflict("该文书当前没有有效送达，不能按补正登记")
+            cursor = connection.execute(
+                """
+                INSERT INTO deliveries(record_id,document,method,voucher_day,voucher_label,notice_day,reason,status,corrects_id,correction_reason,created_by,created_at)
+                VALUES(?,?,?,?,?,?,?,'active',?,?,?,?)
+                """,
+                (
+                    record_id,
+                    entry["document"],
+                    entry["method"],
+                    entry.get("voucher_day", ""),
+                    entry.get("voucher_label", ""),
+                    entry.get("notice_day", ""),
+                    entry.get("reason", ""),
+                    corrects_id,
+                    entry.get("correction_reason", ""),
+                    actor_id,
+                    now,
+                ),
+            )
+            delivery_id = int(cursor.lastrowid)
+            connection.execute(
+                "INSERT INTO audit_events(record_id,action,actor_id,version,details,created_at) VALUES(?,?,?,?,?,?)",
+                (
+                    record_id,
+                    "delivery_corrected" if corrects_id is not None else "delivery_registered",
+                    actor_id,
+                    int(record["version"]),
+                    json.dumps(dict(audit_details, delivery_id=delivery_id), ensure_ascii=False, sort_keys=True),
+                    now,
+                ),
+            )
+            rows = connection.execute(
+                "SELECT * FROM deliveries WHERE record_id=? ORDER BY id",
+                (record_id,),
+            ).fetchall()
+            connection.commit()
+        return [dict(row) for row in rows]
 
     def stats(self) -> Dict[str, int]:
         with self._connect() as connection:

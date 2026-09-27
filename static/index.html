@@ -17,17 +17,32 @@
   <h1>税务稽查案件与复议流程</h1>
   <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
   <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
+  <h2>送达台账</h2>
+  <div class="row">
+    <input id="recordId" placeholder="记录ID" style="width:8rem">
+    <button id="book">查看台账</button>
+    <button id="registerDirect">登记直接签收(今天)</button>
+  </div>
   <pre id="output">点击上方按钮读取服务状态。</pre>
 </main>
 <script>
-const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
-async function show(path) {
-  const response = await fetch(path, {headers});
+const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo","Content-Type":"application/json"};
+async function show(path, options) {
+  const response = await fetch(path, options ? {...options, headers} : {headers});
   const data = await response.json();
   document.getElementById("output").textContent = JSON.stringify(data, null, 2);
 }
 document.getElementById("load").onclick = () => show("/api/records?limit=20");
 document.getElementById("stats").onclick = () => show("/api/stats");
+document.getElementById("book").onclick = () => {
+  const id = document.getElementById("recordId").value.trim();
+  if (id) show(`/api/records/${id}/deliveries`);
+};
+document.getElementById("registerDirect").onclick = () => {
+  const id = document.getElementById("recordId").value.trim();
+  const day = new Date().toISOString().slice(0, 10);
+  if (id) show(`/api/records/${id}/deliveries`, {method: "POST", body: JSON.stringify({data: {method: "direct", voucher_day: day}})});
+};
 </script>
 </body>
 </html>
